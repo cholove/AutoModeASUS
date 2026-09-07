@@ -16,7 +16,7 @@
 | 手动按 Fn+F 切换 | 程序以实际模式为新偏好，继续运行 |
 | **打开/保存对话框中按 Ctrl+G** | **一键跳转到当前资源管理器打开的文件夹**（Listary 风格，详见下节） |
 | 托盘「文件对话框快速跳转」开关 | 启用/停用 Ctrl+G，状态写入 config.json |
-| 托盘图标 | **绿叶形状**，中心色点实时反映当前模式（橙=标准 蓝=性能 绿=安静） |
+| 托盘图标 | **五叶风扇形状**，整体颜色实时反映当前模式（绿=安静 橙=标准 红=性能） |
 
 ## 文件对话框快速跳转（Ctrl+G）
 
@@ -166,7 +166,7 @@ copy /Y bin\Release\AutoModeASUS.exe AutoModeASUS.exe
 ```
 
 - 目标框架 **net48**（.NET Framework 4.8，Win11 自带），引用 System.Management / System.Windows.Forms / System.Drawing / System.Web.Extensions / Microsoft.CSharp / UIAutomationClient / UIAutomationTypes / WindowsBase，均为系统程序集，产出约 50KB 单 exe（含图标资源），零第三方依赖。
-- 图标：`leaf.ico`（多尺寸 16~256px，由 `make_leaf_icon.py` 生成，可改后重跑）；csproj 的 `<ApplicationIcon>leaf.ico</ApplicationIcon>` 负责嵌入 exe；托盘图标由 `Program.cs` 的 `MakeIcon()` 运行时绘制（绿叶 + 模式色点）。改图标后需重新编译才会生效。
+- 图标：`fan.ico`（五叶风扇，多尺寸 16~256px，由 `make_fan_icon.py` 生成，可改后重跑）；csproj 的 `<ApplicationIcon>fan.ico</ApplicationIcon>` 负责嵌入 exe；托盘图标由 `Program.cs` 的 `MakeIcon()` 运行时绘制（同款风扇几何，整体按模式变色：安静=绿 / 标准=橙 / 性能=红）。改 exe 图标后需重新编译才会生效。
 - 注意：本机安全策略禁止直接调 `csc.exe` 编译任意代码，请一律走 `dotnet build` + csproj 标准通道。
 
 ## 依赖

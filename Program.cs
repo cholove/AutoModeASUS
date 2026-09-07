@@ -24,7 +24,7 @@ namespace AutoModeASUS
     ///   5. 自动切换开关（托盘可暂停）；单实例；开机自启；滚动日志
     /// 编译（本机唯一可行通道，csc 直接被安全策略拦截）：
     ///   dotnet build AutoModeASUS.csproj -c Release
-    ///   产物 bin\Release\AutoModeASUS.exe → cp 到根目录（ApplicationIcon=leaf.ico）
+    ///   产物 bin\Release\AutoModeASUS.exe → cp 到根目录（ApplicationIcon=fan.ico）
     /// </summary>
     internal static class Program
     {
@@ -598,48 +598,68 @@ namespace AutoModeASUS
         }
 
         // ---------------- 图标 ----------------
-        // 绿叶形状（水平梭形贝塞尔） + 中心模式色点（橙=标准 蓝=性能 绿=安静）
+        // 五叶风扇（逗号形桨叶 + 中心轮毂环），整体填充模式色：绿=安静 橙=标准 红=性能
+        // 几何参数与 make_fan_icon.py 保持一致（以 256 为设计基准）
         private static Icon MakeIcon(Color c)
         {
-            using (var bmp = new Bitmap(32, 32))
+            const int D = 64;                       // 绘制分辨率
+            float s = D / 256f;                     // 设计单位 → 像素
+            float cx = D / 2f, cy = D / 2f;
+            const double Sweep = 34.0 * Math.PI / 180.0;
+
+            using (var bmp = new Bitmap(D, D))
             {
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     g.Clear(Color.Transparent);
 
-                    // 叶形路径
-                    var path = new GraphicsPath();
-                    var p0 = new PointF(5f, 16f);   // 叶柄端
-                    var p1a = new PointF(12f, 5f);  // 上缘控制点
-                    var p2a = new PointF(24f, 14f);
-                    var p2 = new PointF(29f, 16f);  // 叶尖
-                    var p2b = new PointF(24f, 18f);
-                    var p1b = new PointF(12f, 27f); // 下缘控制点
-                    path.AddBezier(p0, p1a, p2a, p2);
-                    path.AddBezier(p2, p2b, p1b, p0);
-                    path.CloseFigure();
+                    using (var brush = new SolidBrush(c))
+                    {
+                        // 5 片桨叶
+                        for (int i = 0; i < 5; i++)
+                        {
+                            double baseA = -Math.PI / 2 + i * (2 * Math.PI / 5);
+                            var pts = new List<PointF>();
+                            var right = new List<PointF>();
+                            const int steps = 64;
+                            for (int k = 0; k <= steps; k++)
+                            {
+                                double t = (double)k / steps;
+                                double r = (40 + 34 * t) * s;
+                                double th = Sweep * t;
+                                double w = (13 + 33 * Math.Pow(t, 1.1)) * s;
+                                double px = cx + r * Math.Cos(th), py = cy + r * Math.Sin(th);
+                                double tx = -Math.Sin(th), ty = Math.Cos(th);
+                                pts.Add(Rotate(px + w * tx, py + w * ty, cx, cy, baseA));
+                                right.Add(Rotate(px - w * tx, py - w * ty, cx, cy, baseA));
+                            }
+                            // 圆头帽：绕头心从 Sweep+90° 经过外向到 Sweep-90°
+                            double hx = cx + 74 * s * Math.Cos(Sweep), hy = cy + 74 * s * Math.Sin(Sweep);
+                            for (int k = 1; k <= 40; k++)
+                            {
+                                double a = Math.PI / 2 - Math.PI * k / 40.0;
+                                pts.Add(Rotate(hx + 46 * s * Math.Cos(Sweep + a),
+                                               hy + 46 * s * Math.Sin(Sweep + a), cx, cy, baseA));
+                            }
+                            for (int k = right.Count - 1; k >= 0; k--) pts.Add(right[k]);
+                            g.FillPolygon(brush, pts.ToArray());
+                        }
+                    }
 
-                    // 渐变填充
-                    using (var b = new LinearGradientBrush(
-                        new Rectangle(0, 0, 32, 32),
-                        Color.FromArgb(129, 199, 132), Color.FromArgb(27, 94, 32),
-                        LinearGradientMode.Vertical))
-                        g.FillPath(b, path);
+                    // 桨叶与轮毂之间的透明间隙（SourceCopy 擦除）
+                    g.CompositingMode = CompositingMode.SourceCopy;
+                    using (var erase = new SolidBrush(Color.FromArgb(0, 0, 0, 0)))
+                        g.FillEllipse(erase, cx - 45 * s, cy - 45 * s, 90 * s, 90 * s);
 
-                    // 主叶脉
-                    using (var pen = new Pen(Color.FromArgb(180, 255, 255, 255), 1.5f))
-                        g.DrawBezier(pen, new PointF(6f, 16f), new PointF(13f, 14.5f), new PointF(20f, 17f), new PointF(27.5f, 16f));
-
-                    // 深绿描边
-                    using (var pen = new Pen(Color.FromArgb(46, 90, 40), 1f))
-                        g.DrawPath(pen, path);
-
-                    // 中心模式色点 + 白描边
-                    using (var b2 = new SolidBrush(c))
-                        g.FillEllipse(b2, 12.5f, 12.5f, 7f, 7f);
-                    using (var pen = new Pen(Color.White, 1.2f))
-                        g.DrawEllipse(pen, 12.5f, 12.5f, 7f, 7f);
+                    // 轮毂 + 中心孔
+                    g.CompositingMode = CompositingMode.SourceOver;
+                    using (var brush = new SolidBrush(c))
+                        g.FillEllipse(brush, cx - 36 * s, cy - 36 * s, 72 * s, 72 * s);
+                    g.CompositingMode = CompositingMode.SourceCopy;
+                    using (var erase = new SolidBrush(Color.FromArgb(0, 0, 0, 0)))
+                        g.FillEllipse(erase, cx - 14 * s, cy - 14 * s, 28 * s, 28 * s);
+                    g.CompositingMode = CompositingMode.SourceOver;
                 }
                 using (var small = new Bitmap(bmp, 16, 16))
                 {
@@ -648,6 +668,13 @@ namespace AutoModeASUS
                     catch { try { DestroyIcon(h); } catch { } throw; }
                 }
             }
+        }
+
+        private static PointF Rotate(double x, double y, double cx, double cy, double a)
+        {
+            double dx = x - cx, dy = y - cy;
+            double ca = Math.Cos(a), sa = Math.Sin(a);
+            return new PointF((float)(cx + dx * ca - dy * sa), (float)(cy + dy * ca + dx * sa));
         }
 
         [DllImport("user32.dll")]
