@@ -37,6 +37,9 @@ namespace AutoModeASUS
         private static bool _installed;
         private static HotkeyMessageFilter _filter;
 
+        /// <summary>自定义对话框跳转规则（由 TrayContext 启动时注入, 修改需重启生效）。</summary>
+        internal static List<Program.QuickJumpRule> Rules = new List<Program.QuickJumpRule>();
+
         // ---------------- 安装 / 卸载 ----------------
 
         /// <summary>注册全局热键 Ctrl+G。失败（如被其他程序占用）返回 false。</summary>
@@ -95,7 +98,17 @@ namespace AutoModeASUS
 
                 bool isStd = className == "#32770";
                 bool isWps = className == "Qt5QWindowIcon" && IsWpsProcess(dlg);
-                if (!isStd && !isWps) return; // 仅在文件对话框中生效
+
+                Program.QuickJumpRule rule = null;
+                if (!isStd && !isWps)
+                {
+                    rule = MatchRule(dlg, className);
+                    if (rule == null)
+                    {
+                        LogUnsupported(dlg, className);
+                        return; // 非文件对话框(或无匹配规则) → 不做任何事
+                    }
+                }
 
                 string path = GetActiveExplorerFolder();
                 if (string.IsNullOrEmpty(path))
@@ -104,6 +117,12 @@ namespace AutoModeASUS
                     return;
                 }
                 if (!path.EndsWith("\\")) path += "\\"; // 末尾反斜杠 → 对话框按"进入文件夹"处理
+
+                if (rule != null)
+                {
+                    RuleJump(dlg, path, rule);
+                    return;
+                }
 
                 if (isWps)
                 {
@@ -118,14 +137,7 @@ namespace AutoModeASUS
                     return;
                 }
 
-                IntPtr result;
-                IntPtr ok = SendMessageTimeoutW(edit, WM_SETTEXT, IntPtr.Zero, path,
-                    SMTO_ABORTIFHUNG | SMTO_NORMAL, 500, out result);
-                if (ok == IntPtr.Zero)
-                {
-                    Program.Log("快速跳转: 写入文本失败, 目标程序可能以管理员权限运行(需要本程序同权限)");
-                    return;
-                }
+                if (!SetTextWin32(edit, path)) return;
                 PostMessage(edit, WM_KEYDOWN, (IntPtr)VK_RETURN, (IntPtr)1);
                 PostMessage(edit, WM_KEYUP, (IntPtr)VK_RETURN, (IntPtr)0xC0000001);
                 Program.Log("快速跳转 → {0}", path);
@@ -134,6 +146,156 @@ namespace AutoModeASUS
             {
                 Program.Log("快速跳转异常: " + ex.Message);
             }
+        }
+
+        private static bool SetTextWin32(IntPtr edit, string text)
+        {
+            IntPtr result;
+            IntPtr ok = SendMessageTimeoutW(edit, WM_SETTEXT, IntPtr.Zero, text,
+                SMTO_ABORTIFHUNG | SMTO_NORMAL, 500, out result);
+            if (ok != IntPtr.Zero) return true;
+            Program.Log("快速跳转: 写入文本失败, 目标程序可能以管理员权限运行(需要本程序同权限)");
+            return false;
+        }
+
+        // ---------------- 自定义窗口规则 ----------------
+
+        private static Program.QuickJumpRule MatchRule(IntPtr hwnd, string className)
+        {
+            if (Rules == null || Rules.Count == 0) return null;
+            string exe = GetProcessName(hwnd);
+            if (exe == null) return null;
+
+            foreach (var r in Rules)
+            {
+                if (r == null) continue;
+                bool classOk = string.IsNullOrEmpty(r.WindowClass) ||
+                    className.IndexOf(r.WindowClass, StringComparison.OrdinalIgnoreCase) >= 0;
+                bool exeOk = string.IsNullOrEmpty(r.Exe) ||
+                    exe.Equals(r.Exe.Trim(), StringComparison.OrdinalIgnoreCase);
+                if (classOk && exeOk && (!string.IsNullOrEmpty(r.WindowClass) || !string.IsNullOrEmpty(r.Exe)))
+                    return r;
+            }
+            return null;
+        }
+
+        /// <summary>按规则把路径注入目标窗口: uia=UIA 编辑框 SetValue, win32=WM_SETTEXT。</summary>
+        private static void RuleJump(IntPtr hwnd, string path, Program.QuickJumpRule rule)
+        {
+            string mode = string.IsNullOrEmpty(rule.Mode) ? "win32" : rule.Mode.Trim().ToLowerInvariant();
+            bool done = mode == "uia" ? RuleJumpUia(hwnd, path, rule) : RuleJumpWin32(hwnd, path, rule);
+            if (done) Program.Log("快速跳转(规则 {0}/{1}) → {2}", mode, rule.Name ?? "", path);
+        }
+
+        private static bool RuleJumpWin32(IntPtr hwnd, string path, Program.QuickJumpRule rule)
+        {
+            IntPtr edit = FindFileNameEdit(hwnd);
+            if (edit == IntPtr.Zero)
+            {
+                Program.Log("快速跳转(规则 win32): 未找到可见编辑框, 可尝试 mode=uia");
+                return false;
+            }
+            if (!SetTextWin32(edit, path)) return false;
+            PostMessage(edit, WM_KEYDOWN, (IntPtr)VK_RETURN, (IntPtr)1);
+            PostMessage(edit, WM_KEYUP, (IntPtr)VK_RETURN, (IntPtr)0xC0000001);
+            return true;
+        }
+
+        private static bool RuleJumpUia(IntPtr hwnd, string path, Program.QuickJumpRule rule)
+        {
+            AutomationElement root;
+            try { root = AutomationElement.FromHandle(hwnd); }
+            catch (Exception ex)
+            {
+                Program.Log("快速跳转(规则 uia): UIA 获取失败 " + ex.Message);
+                return false;
+            }
+            if (root == null) return false;
+
+            AutomationElement edit = null;
+            // 指定 AutomationId 优先
+            if (!string.IsNullOrEmpty(rule.AutomationId))
+            {
+                try
+                {
+                    edit = root.FindFirst(TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.AutomationIdProperty, rule.AutomationId.Trim()));
+                }
+                catch { }
+            }
+            if (edit == null)
+            {
+                try
+                {
+                    edit = root.FindFirst(TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+                }
+                catch { }
+            }
+            if (edit == null)
+            {
+                Program.Log("快速跳转(规则 uia): 未找到 Edit 元素, 可在规则里填 automationId 指定");
+                return false;
+            }
+
+            try
+            {
+                var vp = edit.GetCurrentPattern(ValuePattern.Pattern) as ValuePattern;
+                if (vp != null)
+                {
+                    vp.SetValue(path);
+                }
+                else
+                {
+                    // 不支持 ValuePattern 时退化为 WM_SETTEXT 直写
+                    IntPtr e = new IntPtr(edit.Current.NativeWindowHandle);
+                    if (e == IntPtr.Zero || !SetTextWin32(e, path))
+                    {
+                        Program.Log("快速跳转(规则 uia): 该 Edit 不支持 ValuePattern");
+                        return false;
+                    }
+                }
+                int h = edit.Current.NativeWindowHandle;
+                IntPtr target = h != 0 ? new IntPtr(h) : hwnd;
+                try { edit.SetFocus(); } catch { }
+                PostMessage(target, WM_KEYDOWN, (IntPtr)VK_RETURN, (IntPtr)1);
+                PostMessage(target, WM_KEYUP, (IntPtr)VK_RETURN, (IntPtr)0xC0000001);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Program.Log("快速跳转(规则 uia)异常: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static string GetProcessName(IntPtr hwnd)
+        {
+            uint pid;
+            GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0) return null;
+            try
+            {
+                using (var p = System.Diagnostics.Process.GetProcessById((int)pid))
+                    return p.ProcessName + ".exe";
+            }
+            catch { return null; }
+        }
+
+        // 未匹配时记录窗口特征, 方便用户据此写规则(同一窗口 10s 内只记一次)
+        private static string _lastUnsupportedKey;
+        private static DateTime _lastUnsupportedTime;
+
+        private static void LogUnsupported(IntPtr hwnd, string className)
+        {
+            string exe = GetProcessName(hwnd) ?? "?";
+            string key = className + "|" + exe;
+            DateTime now = DateTime.Now;
+            if (key == _lastUnsupportedKey && (now - _lastUnsupportedTime).TotalSeconds < 10) return;
+            _lastUnsupportedKey = key;
+            _lastUnsupportedTime = now;
+            Program.Log("快速跳转: 窗口未匹配 (class={0} exe={1}), 如需支持请在 config.json 的 QuickJumpRules 中添加规则",
+                className, exe);
         }
 
         // ---------------- WPS 自绘文件对话框（Qt + UIA） ----------------

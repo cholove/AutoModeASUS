@@ -41,6 +41,17 @@ namespace AutoModeASUS
         internal static readonly string ExeDir = AppDomain.CurrentDomain.BaseDirectory;
 
         // ---------------- 配置 ----------------
+        /// <summary>自定义对话框跳转规则: 前台窗口 class 含 WindowClass 且进程为 Exe 时, 按 Mode 注入路径。</summary>
+        internal sealed class QuickJumpRule
+        {
+            // 字段值由 JavaScriptSerializer 反序列化赋值, 显式 = null 以抑制 CS0649
+            public string Name = null;          // 备注名(日志显示)
+            public string WindowClass = null;   // 窗口类名子串匹配, 如 Chrome_WidgetWin_1
+            public string Exe = null;           // 进程名精确匹配(不区分大小写), 如 notepad++.exe
+            public string Mode = null;          // win32=WM_SETTEXT+回车(默认); uia=UIA ValuePattern+回车
+            public string AutomationId = null;  // 可选, mode=uia 时指定目标 Edit 的 AutomationId
+        }
+
         internal sealed class Config
         {
             public int IdleSeconds = 300;       // 无人操作多少秒后切标准 (300 = 5分钟)
@@ -49,6 +60,7 @@ namespace AutoModeASUS
             public int IdleModeValue = 0;       // 空闲目标模式: 0=标准
             public int DefaultActiveValue = 2;  // 活动偏好模式: 2=性能
             public int QuickJumpEnabled = 1;    // 文件对话框 Ctrl+G 快速跳转: 1=开启
+            public List<QuickJumpRule> QuickJumpRules = new List<QuickJumpRule>();
         }
 
         internal static Config LoadConfig()
@@ -68,11 +80,22 @@ namespace AutoModeASUS
                     SetInt(d, "IdleModeValue", v => cfg.IdleModeValue = v);
                     SetInt(d, "DefaultActiveValue", v => cfg.DefaultActiveValue = v);
                     SetInt(d, "QuickJumpEnabled", v => cfg.QuickJumpEnabled = v);
+                    object rules;
+                    if (d.TryGetValue("QuickJumpRules", out rules) && rules != null)
+                    {
+                        try
+                        {
+                            var list = jss.Deserialize<List<QuickJumpRule>>(
+                                jss.Serialize(rules));
+                            if (list != null) cfg.QuickJumpRules = list;
+                        }
+                        catch (Exception ex2) { Log("QuickJumpRules 解析失败: " + ex2.Message); }
+                    }
                 }
                 else
                 {
                     File.WriteAllText(path,
-                        "{\n  \"IdleSeconds\": 300,\n  \"PollSeconds\": 10,\n  \"ActivitySeconds\": 15,\n  \"IdleModeValue\": 0,\n  \"DefaultActiveValue\": 2,\n  \"QuickJumpEnabled\": 1\n}\n",
+                        "{\n  \"IdleSeconds\": 300,\n  \"PollSeconds\": 10,\n  \"ActivitySeconds\": 15,\n  \"IdleModeValue\": 0,\n  \"DefaultActiveValue\": 2,\n  \"QuickJumpEnabled\": 1,\n  \"QuickJumpRules\": []\n}\n",
                         Encoding.UTF8);
                 }
             }
@@ -93,6 +116,11 @@ namespace AutoModeASUS
         {
             try
             {
+                string rulesJson;
+                try { rulesJson = new JavaScriptSerializer().Serialize(cfg.QuickJumpRules ?? new List<QuickJumpRule>()); }
+                catch { rulesJson = "[]"; }
+                if (string.IsNullOrEmpty(rulesJson)) rulesJson = "[]";
+
                 // 手工序列化保持与默认模板一致的 PascalCase 字段名
                 string json = "{\n" +
                     "  \"IdleSeconds\": " + cfg.IdleSeconds + ",\n" +
@@ -100,7 +128,8 @@ namespace AutoModeASUS
                     "  \"ActivitySeconds\": " + cfg.ActivitySeconds + ",\n" +
                     "  \"IdleModeValue\": " + cfg.IdleModeValue + ",\n" +
                     "  \"DefaultActiveValue\": " + cfg.DefaultActiveValue + ",\n" +
-                    "  \"QuickJumpEnabled\": " + cfg.QuickJumpEnabled + "\n" +
+                    "  \"QuickJumpEnabled\": " + cfg.QuickJumpEnabled + ",\n" +
+                    "  \"QuickJumpRules\": " + rulesJson + "\n" +
                     "}\n";
                 File.WriteAllText(Path.Combine(ExeDir, CONFIG_FILE), json, Encoding.UTF8);
             }
@@ -342,6 +371,7 @@ namespace AutoModeASUS
         {
             _cfg = cfg;
             _jumpEnabled = cfg.QuickJumpEnabled != 0;
+            QuickJump.Rules = cfg.QuickJumpRules ?? new List<Program.QuickJumpRule>();
 
             _miPerf = new ToolStripMenuItem("性能模式", null, (s, e) => TraySetMode(AsusWmi.MODE_TURBO));
             _miBal = new ToolStripMenuItem("标准模式", null, (s, e) => TraySetMode(AsusWmi.MODE_BALANCED));
