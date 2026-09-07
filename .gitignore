@@ -1,0 +1,14 @@
+# 构建产物
+bin/
+obj/
+*.pdb
+AutoModeASUS.exe
+
+# 运行时文件
+log/
+config.json
+stop.flag
+
+# 系统文件
+Thumbs.db
+Desktop.ini
