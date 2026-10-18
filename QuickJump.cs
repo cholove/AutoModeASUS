@@ -14,8 +14,9 @@ namespace AutoModeASUS
     /// 触发：前台窗口是文件对话框（窗口类 #32770）时按 Ctrl+G。
     /// 行为：取最近活动的 Windows 资源管理器窗口/标签页的当前文件夹，
     ///       写入对话框"文件名"编辑框并模拟回车，使对话框导航到该目录。
-    /// 路径来源：Shell.Application COM（IShellWindows）枚举资源管理器窗口与 Win11 标签页，
-    ///           再按窗口 Z 序（EnumWindows）判断"最近活动"。
+    /// 路径来源：Shell.Application COM（IShellWindows）枚举资源管理器窗口与 Win11 标签页
+    ///           （每标签独立条目），按帧窗口 Z 序取最近活动帧，再用帧标题中的活动标签名
+    ///           与各标签路径末级文件夹名匹配，精确锁定"当前活动标签"。
     /// 思路参考：https://github.com/lch319/XiaoYao_QuickJump （AHK 实现，本文件为其核心跳转的 C# 移植）
     /// </summary>
     internal static class QuickJump
@@ -32,6 +33,7 @@ namespace AutoModeASUS
         private const uint SMTO_ABORTIFHUNG = 0x0002;
         private const uint SMTO_NORMAL = 0x0000;
         private const uint GA_ROOTOWNER = 3;
+        private const uint GA_ROOT = 2;
         private const uint GW_OWNER = 4;
 
         private static bool _installed;
@@ -417,19 +419,30 @@ namespace AutoModeASUS
         // ---------------- 获取资源管理器当前路径 ----------------
 
         /// <summary>
-        /// 通过 Shell.Application (IShellWindows) 枚举资源管理器窗口/Win11 标签页,
-        /// 按 Z 序取最近活动的窗口的 LocationURL。
-        /// 注: Win11 多标签共享同一帧 HWND 时无法精确区分活动标签, 取该 HWND 的第一个有效路径。
+        /// 取当前活动资源管理器文件夹(带尾部反斜杠), 失败返回 null。
         /// </summary>
         private static string GetActiveExplorerFolder()
         {
-            // Z 序列表(最顶在前)。对话框打开时, 其下方第一个资源管理器窗口即最近活动窗口。
+            return GetFolderViaShellWindows();
+        }
+
+        /// <summary>
+        /// 通过 Shell.Application (IShellWindows) 枚举资源管理器窗口与 Win11 标签页(每个标签是独立 COM 条目)。
+        /// 1) 按顶层帧窗口(GetAncestor GA_ROOT)的 Z 序取最近活动的帧;
+        /// 2) 帧标题形如 "活动标签名 和 N 个其他选项卡 - 文件资源管理器", 解析活动标签显示名,
+        ///    与该帧内各标签路径的末级文件夹名匹配 → 精确命中活动标签(Win11 多标签修复关键);
+        /// 3) 标题匹配失败(盘符根/库等显示名与路径末级不一致)时取该帧第一个有效路径。
+        /// 注: 曾尝试 UIA 读地址栏, 但新版 Win11 资源管理器地址栏为 WinUI TextBox,
+        ///     Name='地址栏' 且 Value 为空, 不暴露路径, 实测不可行, 已移除。
+        /// </summary>
+        private static string GetFolderViaShellWindows()
+        {
+            // Z 序列表(最顶在前)
             var zOrder = new List<IntPtr>();
             EnumWindows((h, l) => { zOrder.Add(h); return true; }, IntPtr.Zero);
 
-            int bestRank = int.MaxValue;
-            string bestPath = null;
-
+            // 按帧分组收集有效路径
+            var frames = new Dictionary<IntPtr, List<string>>();
             try
             {
                 Type t = Type.GetTypeFromProgID("Shell.Application");
@@ -449,27 +462,83 @@ namespace AutoModeASUS
                         int hwndVal;
                         try { hwndVal = Convert.ToInt32(w.HWND); } catch { continue; }
                         if (hwndVal <= 0) continue;
-                        var hwnd = new IntPtr(hwndVal);
 
                         string path = UrlToLocalPath(url);
                         if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) continue;
 
-                        int rank = zOrder.IndexOf(hwnd);
-                        if (rank < 0) rank = int.MaxValue - 1; // 最小化/隐藏窗口排最后
-                        if (rank < bestRank)
+                        IntPtr frame = GetAncestor(new IntPtr(hwndVal), GA_ROOT);
+                        if (frame == IntPtr.Zero) continue;
+
+                        List<string> list;
+                        if (!frames.TryGetValue(frame, out list))
                         {
-                            bestRank = rank;
-                            bestPath = path;
+                            list = new List<string>();
+                            frames[frame] = list;
                         }
+                        if (!list.Contains(path)) list.Add(path);
                     }
-                    catch { /* 个别窗口不可访问, 跳过 */ }
+                    catch { /* 个别条目不可访问, 跳过 */ }
                 }
             }
             catch (Exception ex)
             {
                 Program.Log("快速跳转: Shell.Application 枚举失败 " + ex.Message);
+                return null;
             }
-            return bestPath;
+            if (frames.Count == 0) return null;
+
+            // 最近活动的帧(Z 序最靠前; 最小化/隐藏帧排最后)
+            IntPtr bestFrame = IntPtr.Zero;
+            int bestRank = int.MaxValue;
+            foreach (var f in frames.Keys)
+            {
+                int rank = zOrder.IndexOf(f);
+                if (rank < 0) rank = int.MaxValue - 1;
+                if (rank < bestRank) { bestRank = rank; bestFrame = f; }
+            }
+
+            var paths = frames[bestFrame];
+
+            // 用帧标题消歧活动标签
+            var tsb = new StringBuilder(512);
+            GetWindowText(bestFrame, tsb, tsb.Capacity);
+            string activeName = ExtractActiveTabName(tsb.ToString());
+            if (activeName != null)
+            {
+                foreach (var p in paths)
+                {
+                    string leaf;
+                    try { leaf = Path.GetFileName(p.TrimEnd('\\')); } catch { continue; }
+                    if (!string.IsNullOrEmpty(leaf) &&
+                        leaf.Equals(activeName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Program.Log("快速跳转(活动标签[{0}]) → {1}", activeName, p);
+                        return p.EndsWith("\\") ? p : p + "\\";
+                    }
+                }
+            }
+
+            string first = paths[0];
+            Program.Log("快速跳转(首标签, 标题未匹配:{0}) → {1}", activeName ?? "?", first);
+            return first.EndsWith("\\") ? first : first + "\\";
+        }
+
+        /// <summary>
+        /// 从资源管理器帧标题提取活动标签显示名:
+        /// "2026党务 和 1 个其他选项卡 - 文件资源管理器" → "2026党务";
+        /// "AutoModeASUS - 文件资源管理器" → "AutoModeASUS"; 英文同理("X and 2 other tabs - Explorer")。
+        /// </summary>
+        private static string ExtractActiveTabName(string title)
+        {
+            if (string.IsNullOrEmpty(title)) return null;
+            int i = title.IndexOf(" - ", StringComparison.Ordinal);
+            if (i >= 0) title = title.Substring(0, i);
+            i = title.IndexOf(" 和 ", StringComparison.Ordinal);
+            if (i >= 0) title = title.Substring(0, i);
+            i = title.IndexOf(" and ", StringComparison.OrdinalIgnoreCase);
+            if (i >= 0) title = title.Substring(0, i);
+            title = title.Trim();
+            return title.Length == 0 ? null : title;
         }
 
         private static string UrlToLocalPath(string url)
@@ -582,5 +651,7 @@ namespace AutoModeASUS
         private static extern IntPtr GetParent(IntPtr hWnd);
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
     }
 }
