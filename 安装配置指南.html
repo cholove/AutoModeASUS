@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoModeASUS 新电脑安装配置步骤</title>
+<style>
+  :root {
+    --green: #00aa3c;
+    --orange: #ff8c00;
+    --red: #dc2828;
+    --ink: #2b2b33;
+    --muted: #6b6b76;
+    --line: #e4e4ea;
+    --bg: #f7f7fa;
+    --code-bg: #23252b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.7;
+  }
+  header {
+    background: linear-gradient(135deg, #1f2126, #34373f);
+    color: #fff;
+    padding: 36px 24px 30px;
+    text-align: center;
+  }
+  header h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: 1px; }
+  header p { margin: 0; color: #b9bcc6; font-size: 14px; }
+  .fan { display: inline-block; vertical-align: -6px; margin-right: 8px; }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 28px 20px 60px;
+  }
+  section {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 22px 26px;
+    margin-bottom: 22px;
+  }
+  h2 {
+    font-size: 19px;
+    margin: 0 0 14px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--line);
+  }
+  h2 .num {
+    display: inline-block;
+    width: 26px; height: 26px;
+    line-height: 26px;
+    text-align: center;
+    border-radius: 50%;
+    background: var(--ink);
+    color: #fff;
+    font-size: 14px;
+    margin-right: 8px;
+  }
+  h3 { font-size: 15px; margin: 18px 0 8px; }
+  ol, ul { margin: 8px 0; padding-left: 24px; }
+  li { margin: 4px 0; }
+  code {
+    background: #eef0f4;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+  }
+  pre {
+    background: var(--code-bg);
+    color: #e8eaf0;
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  pre .cmt { color: #7f8aa0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--line);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #f0f1f5; }
+  .tag { display: inline-block; border-radius: 4px; padding: 0 8px; font-size: 12px; color: #fff; }
+  .tag.must { background: var(--red); }
+  .tag.opt  { background: #9aa0ae; }
+  .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -1px; margin: 0 2px; }
+  .dot.silent { background: var(--green); }
+  .dot.balanced { background: var(--orange); }
+  .dot.turbo { background: var(--red); }
+  .tip {
+    background: #fff8e8;
+    border-left: 4px solid var(--orange);
+    padding: 8px 14px;
+    border-radius: 0 6px 6px 0;
+    margin: 10px 0;
+    font-size: 14px;
+  }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 10px 0 30px;
+  }
+  @media print {
+    body { background: #fff; }
+    section { border: none; padding: 0; margin-bottom: 14px; }
+    header { background: #1f2126 !important; -webkit-print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>
+    <svg class="fan" width="30" height="30" viewBox="0 0 256 256">
+      <g fill="#fff">
+        <g id="b">
+          <path d="M128 92 C 150 88 168 74 172 52 A 46 46 0 1 1 130 102 Z" transform="rotate(0 128 128)"/>
+        </g>
+        <use href="#b" transform="rotate(72 128 128)"/>
+        <use href="#b" transform="rotate(144 128 128)"/>
+        <use href="#b" transform="rotate(216 128 128)"/>
+        <use href="#b" transform="rotate(288 128 128)"/>
+        <circle cx="128" cy="128" r="36"/>
+      </g>
+      <circle cx="128" cy="128" r="14" fill="#34373f"/>
+    </svg>
+    AutoModeASUS 新电脑安装配置步骤
+  </h1>
+  <p>华硕性能模式自动切换工具 · 部署指南</p>
+</header>
+
+<main>
+
+<section>
+  <h2><span class="num">一</span>前提条件检查</h2>
+  <ol>
+    <li><strong>操作系统</strong>：Windows 10 (1903+) 或 Windows 11（自带 .NET Framework 4.8，无需额外安装运行时）</li>
+    <li><strong>华硕机型</strong>：需已安装 ASUS 系统驱动（MyASUS 或 ATK Package），否则无法读写性能模式</li>
+    <li>验证驱动是否可用：拷贝过去后运行 <code>AutoModeASUS.exe get</code>，能返回“当前模式”即说明 WMI 通道正常</li>
+  </ol>
+</section>
+
+<section>
+  <h2><span class="num">二</span>拷贝文件</h2>
+  <table>
+    <tr><th>文件</th><th>是否必需</th><th>说明</th></tr>
+    <tr><td><code>AutoModeASUS.exe</code></td><td><span class="tag must">必需</span></td><td>单文件即可运行，图标已内嵌</td></tr>
+    <tr><td><code>config.json</code></td><td><span class="tag opt">可选</span></td><td>保留个性化配置（空闲阈值 / 快速跳转规则）；不拷则首次运行自动生成默认值</td></tr>
+    <tr><td><code>stop.bat</code></td><td><span class="tag opt">可选</span></td><td>用于快速停止程序</td></tr>
+  </table>
+  <div class="tip"><code>log\</code> 目录不用拷，程序自动创建。</div>
+</section>
+
+<section>
+  <h2><span class="num">三</span>安装步骤</h2>
+<pre><code><span class="cmt">:: 1. 把文件放到一个固定目录，例如</span>
+D:\Software\AutoModeASUS\
+
+<span class="cmt">:: 2. 验证 WMI 通道（华硕机型必须成功）</span>
+AutoModeASUS.exe get
+
+<span class="cmt">:: 3. 手动测试模式切换</span>
+AutoModeASUS.exe set silent    <span class="cmt">:: 安静</span>
+AutoModeASUS.exe set balanced  <span class="cmt">:: 标准</span>
+AutoModeASUS.exe set turbo     <span class="cmt">:: 性能</span>
+
+<span class="cmt">:: 4. 安装开机自启（写入当前用户的注册表 Run 键）</span>
+AutoModeASUS.exe --install
+
+<span class="cmt">:: 5. 启动托盘后台程序</span>
+AutoModeASUS.exe</code></pre>
+</section>
+
+<section>
+  <h2><span class="num">四</span>验证功能</h2>
+  <ol>
+    <li><strong>托盘图标</strong>：任务栏右下角出现<strong>风扇图标</strong>，颜色对应当前模式
+      <span class="dot silent"></span>绿=安静
+      <span class="dot balanced"></span>橙=标准
+      <span class="dot turbo"></span>红=性能</li>
+    <li><strong>右键菜单</strong>：可手动切换三档模式，勾选状态实时同步</li>
+    <li><strong>自动切换</strong>：停止操作 5 分钟后自动切标准（橙色），动鼠标恢复后自动切回性能（红色）</li>
+    <li><strong>Fn+F 手动切换</strong>：按键盘 Fn+F 后，程序会尊重手动选择并以该档为新偏好</li>
+    <li><strong>Ctrl+G 快速跳转</strong>（可选）：打开记事本的“打开/另存为”对话框，按 Ctrl+G 应跳转到资源管理器当前打开的文件夹</li>
+  </ol>
+</section>
+
+<section>
+  <h2><span class="num">五</span>常见问题</h2>
+  <table>
+    <tr><th>现象</th><th>原因与处理</th></tr>
+    <tr><td><code>get</code> 命令报错“读取失败”</td><td>非华硕机型或未装 ATK/MyASUS 驱动，本程序无法使用</td></tr>
+    <tr><td>托盘图标一直是灰色</td><td>WMI 初始化失败，查看 <code>log\auto-mode.log</code> 定位</td></tr>
+    <tr><td>Ctrl+G 对管理员权限对话框无效</td><td>需右键 exe →“以管理员身份运行”（或设置快捷方式属性勾选）</td></tr>
+    <tr><td>提示“已有实例在运行”</td><td>单实例保护，先运行 <code>stop.bat</code> 或任务管理器结束旧进程</td></tr>
+    <tr><td>开机没有自动启动</td><td>重新执行 <code>AutoModeASUS.exe --install</code>，注意自启绑定的是当前路径，移动目录后需重装</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2><span class="num">六</span>卸载</h2>
+<pre><code>AutoModeASUS.exe --uninstall   <span class="cmt">:: 移除开机自启</span>
+<span class="cmt">:: 再直接删除整个目录即可</span></code></pre>
+</section>
+
+</main>
+
+<footer>AutoModeASUS · 华硕性能模式自动切换 · 生成日期 2026-09-08</footer>
+
+</body>
+</html>
