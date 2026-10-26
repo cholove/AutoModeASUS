@@ -60,6 +60,7 @@ namespace AutoModeASUS
             public int IdleModeValue = 0;       // 空闲目标模式: 0=标准
             public int DefaultActiveValue = 2;  // 活动偏好模式: 2=性能
             public int QuickJumpEnabled = 1;    // 文件对话框 Ctrl+G 快速跳转: 1=开启
+            public int AutoJumpEnabled = 1;     // 对话框出现即自动跳转(免 Ctrl+G): 1=开启
             public List<QuickJumpRule> QuickJumpRules = new List<QuickJumpRule>();
         }
 
@@ -80,6 +81,7 @@ namespace AutoModeASUS
                     SetInt(d, "IdleModeValue", v => cfg.IdleModeValue = v);
                     SetInt(d, "DefaultActiveValue", v => cfg.DefaultActiveValue = v);
                     SetInt(d, "QuickJumpEnabled", v => cfg.QuickJumpEnabled = v);
+                    SetInt(d, "AutoJumpEnabled", v => cfg.AutoJumpEnabled = v);
                     object rules;
                     if (d.TryGetValue("QuickJumpRules", out rules) && rules != null)
                     {
@@ -95,7 +97,7 @@ namespace AutoModeASUS
                 else
                 {
                     File.WriteAllText(path,
-                        "{\n  \"IdleSeconds\": 300,\n  \"PollSeconds\": 10,\n  \"ActivitySeconds\": 15,\n  \"IdleModeValue\": 0,\n  \"DefaultActiveValue\": 2,\n  \"QuickJumpEnabled\": 1,\n  \"QuickJumpRules\": []\n}\n",
+                        "{\n  \"IdleSeconds\": 300,\n  \"PollSeconds\": 10,\n  \"ActivitySeconds\": 15,\n  \"IdleModeValue\": 0,\n  \"DefaultActiveValue\": 2,\n  \"QuickJumpEnabled\": 1,\n  \"AutoJumpEnabled\": 1,\n  \"QuickJumpRules\": []\n}\n",
                         Encoding.UTF8);
                 }
             }
@@ -129,6 +131,7 @@ namespace AutoModeASUS
                     "  \"IdleModeValue\": " + cfg.IdleModeValue + ",\n" +
                     "  \"DefaultActiveValue\": " + cfg.DefaultActiveValue + ",\n" +
                     "  \"QuickJumpEnabled\": " + cfg.QuickJumpEnabled + ",\n" +
+                    "  \"AutoJumpEnabled\": " + cfg.AutoJumpEnabled + ",\n" +
                     "  \"QuickJumpRules\": " + rulesJson + "\n" +
                     "}\n";
                 File.WriteAllText(Path.Combine(ExeDir, CONFIG_FILE), json, Encoding.UTF8);
@@ -365,12 +368,15 @@ namespace AutoModeASUS
         private readonly ToolStripMenuItem _miSil;
         private readonly ToolStripMenuItem _miAuto;
         private readonly ToolStripMenuItem _miJump;
+        private readonly ToolStripMenuItem _miAutoJump;
         private bool _jumpEnabled;
+        private bool _autoJumpEnabled;
 
         public TrayContext(Program.Config cfg)
         {
             _cfg = cfg;
             _jumpEnabled = cfg.QuickJumpEnabled != 0;
+            _autoJumpEnabled = cfg.AutoJumpEnabled != 0;
             QuickJump.Rules = cfg.QuickJumpRules ?? new List<Program.QuickJumpRule>();
 
             _miPerf = new ToolStripMenuItem("性能模式", null, (s, e) => TraySetMode(AsusWmi.MODE_TURBO));
@@ -389,6 +395,10 @@ namespace AutoModeASUS
                 (s, e) => ToggleQuickJump())
             { Checked = _jumpEnabled };
 
+            _miAutoJump = new ToolStripMenuItem("对话框自动跳转 (免 Ctrl+G)", null,
+                (s, e) => ToggleAutoJump())
+            { Checked = _autoJumpEnabled };
+
             var menu = new ContextMenuStrip();
             menu.Items.Add(new ToolStripMenuItem("AutoMode 华硕性能模式") { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
@@ -398,6 +408,7 @@ namespace AutoModeASUS
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(_miAuto);
             menu.Items.Add(_miJump);
+            menu.Items.Add(_miAutoJump);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(new ToolStripMenuItem("打开日志目录", null, (s, e) => OpenLogDir()));
             menu.Items.Add(new ToolStripMenuItem("退出", null, (s, e) => ExitApp()));
@@ -421,6 +432,9 @@ namespace AutoModeASUS
                 _miJump.Checked = false;
                 Program.Log("快速跳转: Ctrl+G 热键注册失败(可能被其他程序占用), 已禁用");
             }
+
+            // 对话框自动跳转(与 Ctrl+G 热键相互独立)
+            if (_autoJumpEnabled) QuickJump.StartAutoWatch();
 
             // 初始同步一次模式显示
             RefreshUi(ReadModeSafe());
@@ -447,6 +461,24 @@ namespace AutoModeASUS
             }
             _miJump.Checked = _jumpEnabled;
             _cfg.QuickJumpEnabled = _jumpEnabled ? 1 : 0;
+            Program.SaveConfig(_cfg);
+        }
+
+        /// <summary>切换"对话框出现即自动跳转"(免 Ctrl+G)。</summary>
+        private void ToggleAutoJump()
+        {
+            if (_autoJumpEnabled)
+            {
+                QuickJump.StopAutoWatch();
+                _autoJumpEnabled = false;
+            }
+            else
+            {
+                QuickJump.StartAutoWatch();
+                _autoJumpEnabled = true;
+            }
+            _miAutoJump.Checked = _autoJumpEnabled;
+            _cfg.AutoJumpEnabled = _autoJumpEnabled ? 1 : 0;
             Program.SaveConfig(_cfg);
         }
 
@@ -579,6 +611,7 @@ namespace AutoModeASUS
 
         private void ExitApp()
         {
+            try { QuickJump.StopAutoWatch(); } catch { }
             try { QuickJump.Uninstall(); } catch { }
             try { ReplaceIcon(null); } catch { }
             if (_icon != null)

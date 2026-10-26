@@ -12,6 +12,7 @@ namespace AutoModeASUS
     /// 文件对话框快速跳转（Listary 风格 Ctrl+G，最小核心实现）
     ///
     /// 触发：前台窗口是文件对话框（窗口类 #32770）时按 Ctrl+G。
+    ///       另可选开启"自动跳转"：定时扫描新出现的文件对话框，出现即自动跳转（免 Ctrl+G）。
     /// 行为：取最近活动的 Windows 资源管理器窗口/标签页的当前文件夹，
     ///       写入对话框"文件名"编辑框并模拟回车，使对话框导航到该目录。
     /// 路径来源：Shell.Application COM（IShellWindows）枚举资源管理器窗口与 Win11 标签页
@@ -42,6 +43,38 @@ namespace AutoModeASUS
         /// <summary>自定义对话框跳转规则（由 TrayContext 启动时注入, 修改需重启生效）。</summary>
         internal static List<Program.QuickJumpRule> Rules = new List<Program.QuickJumpRule>();
 
+        // ---------------- 自动跳转（免 Ctrl+G）相关状态 ----------------
+
+        private const int PUMP_INTERVAL_MS = 250;      // 对话框扫描间隔
+        private const int AUTO_JUMP_DELAY_MS = 400;    // 对话框出现后等待其初始化
+        private const int AUTO_JUMP_RETRY_MS = 500;    // 失败重试间隔
+        private const int AUTO_JUMP_MAX_ATTEMPTS = 3;  // 最多尝试次数
+        private const int RESTORE_DELAY_MS = 350;      // 跳转后恢复原文件名前的等待
+        private const int WM_GETTEXT = 0x000D;
+
+        internal static bool AutoJumpEnabled;
+
+        private static System.Windows.Forms.Timer _pump;
+        private static bool _autoBaselineDone;
+        private static readonly Dictionary<IntPtr, DateTime> _handledDialogs = new Dictionary<IntPtr, DateTime>();
+        private static readonly Dictionary<IntPtr, PendingJump> _pendingJumps = new Dictionary<IntPtr, PendingJump>();
+        private static readonly List<PendingRestore> _pendingRestores = new List<PendingRestore>();
+
+        private sealed class PendingJump
+        {
+            public DateTime Due;
+            public int Attempts;
+        }
+
+        private sealed class PendingRestore
+        {
+            public DateTime Due;
+            public IntPtr Edit;                 // Win32 编辑框（WPS 时为零）
+            public AutomationElement UiaEdit;   // WPS/UIA 编辑框（Win32 时为 null）
+            public string Original;             // 跳转前编辑框里的原文本（如另存为的建议文件名）
+            public string Injected;             // 注入的目录路径
+        }
+
         // ---------------- 安装 / 卸载 ----------------
 
         /// <summary>注册全局热键 Ctrl+G。失败（如被其他程序占用）返回 false。</summary>
@@ -53,6 +86,7 @@ namespace AutoModeASUS
             _filter = new HotkeyMessageFilter();
             Application.AddMessageFilter(_filter);
             _installed = true;
+            EnsurePump();
             return true;
         }
 
@@ -66,6 +100,48 @@ namespace AutoModeASUS
                 _filter = null;
             }
             _installed = false;
+            MaybeStopPump();
+        }
+
+        // ---------------- 自动跳转开关 ----------------
+
+        /// <summary>开启"对话框出现即自动跳转"（与 Ctrl+G 热键相互独立）。</summary>
+        internal static void StartAutoWatch()
+        {
+            AutoJumpEnabled = true;
+            _autoBaselineDone = false;   // 首次扫描记录基线, 不触发已存在的对话框
+            EnsurePump();
+            Program.Log("自动跳转: 已开启");
+        }
+
+        internal static void StopAutoWatch()
+        {
+            AutoJumpEnabled = false;
+            _pendingJumps.Clear();
+            _handledDialogs.Clear();
+            _autoBaselineDone = false;
+            Program.Log("自动跳转: 已关闭");
+            MaybeStopPump();
+        }
+
+        /// <summary>自动跳转与热键共用的 UI 线程定时器（250ms）。</summary>
+        private static void EnsurePump()
+        {
+            if (_pump != null) return;
+            _pump = new System.Windows.Forms.Timer();
+            _pump.Interval = PUMP_INTERVAL_MS;
+            _pump.Tick += (s, e) => PumpTick();
+            _pump.Start();
+        }
+
+        private static void MaybeStopPump()
+        {
+            if (_installed || AutoJumpEnabled) return;
+            if (_pump == null) return;
+            try { _pump.Stop(); _pump.Dispose(); } catch { }
+            _pump = null;
+            _pendingJumps.Clear();
+            _pendingRestores.Clear();
         }
 
         /// <summary>
@@ -78,7 +154,7 @@ namespace AutoModeASUS
             {
                 if (m.Msg == WM_HOTKEY && m.WParam.ToInt64() == HOTKEY_ID)
                 {
-                    TryJumpNow();
+                    TryJump(GetForegroundWindow(), true);
                     return true; // 已处理, 不再分发
                 }
                 return false;
@@ -87,12 +163,15 @@ namespace AutoModeASUS
 
         // ---------------- 核心逻辑 ----------------
 
-        private static void TryJumpNow()
+        /// <summary>
+        /// 对指定对话框执行跳转。logUnsupported=true 时对不支持的窗口写提示（仅热键路径）。
+        /// 返回 true 表示已成功注入并触发导航。
+        /// </summary>
+        private static bool TryJump(IntPtr dlg, bool logUnsupported)
         {
             try
             {
-                IntPtr dlg = GetForegroundWindow();
-                if (dlg == IntPtr.Zero) return;
+                if (dlg == IntPtr.Zero) return false;
 
                 var cls = new StringBuilder(64);
                 GetClassName(dlg, cls, cls.Capacity);
@@ -107,8 +186,8 @@ namespace AutoModeASUS
                     rule = MatchRule(dlg, className);
                     if (rule == null)
                     {
-                        LogUnsupported(dlg, className);
-                        return; // 非文件对话框(或无匹配规则) → 不做任何事
+                        if (logUnsupported) LogUnsupported(dlg, className);
+                        return false; // 非文件对话框(或无匹配规则) → 不做任何事
                     }
                 }
 
@@ -116,38 +195,242 @@ namespace AutoModeASUS
                 if (string.IsNullOrEmpty(path))
                 {
                     Program.Log("快速跳转: 未获取到资源管理器当前文件夹");
-                    return;
+                    return false;
                 }
                 if (!path.EndsWith("\\")) path += "\\"; // 末尾反斜杠 → 对话框按"进入文件夹"处理
 
                 if (rule != null)
                 {
-                    RuleJump(dlg, path, rule);
-                    return;
+                    return RuleJump(dlg, path, rule);
                 }
 
                 if (isWps)
                 {
-                    WpsJump(dlg, path);
-                    return;
+                    return WpsJump(dlg, path);
                 }
 
                 IntPtr edit = FindFileNameEdit(dlg);
                 if (edit == IntPtr.Zero)
                 {
                     Program.Log("快速跳转: 未找到对话框的文件名编辑框");
-                    return;
+                    return false;
                 }
 
-                if (!SetTextWin32(edit, path)) return;
+                string original = GetEditText(edit);
+                if (!SetTextWin32(edit, path)) return false;
                 PostMessage(edit, WM_KEYDOWN, (IntPtr)VK_RETURN, (IntPtr)1);
                 PostMessage(edit, WM_KEYUP, (IntPtr)VK_RETURN, (IntPtr)0xC0000001);
+                ScheduleRestore(edit, null, original, path);
                 Program.Log("快速跳转 → {0}", path);
+                return true;
             }
             catch (Exception ex)
             {
                 Program.Log("快速跳转异常: " + ex.Message);
+                return false;
             }
+        }
+
+        // ---------------- 自动跳转：对话框检测与调度 ----------------
+
+        private static void PumpTick()
+        {
+            try
+            {
+                if (AutoJumpEnabled) ScanDialogs();
+                RunPendingJumps();
+                RunPendingRestores();
+            }
+            catch (Exception ex)
+            {
+                Program.Log("自动跳转: 轮询异常 " + ex.Message);
+            }
+        }
+
+        /// <summary>扫描所有顶层窗口, 把新出现的文件对话框加入待跳转队列。</summary>
+        private static void ScanDialogs()
+        {
+            var found = new List<IntPtr>();
+            EnumWindows((h, l) =>
+            {
+                if (!IsWindowVisible(h)) return true;
+                var sb = new StringBuilder(64);
+                GetClassName(h, sb, sb.Capacity);
+                string cls = sb.ToString();
+
+                if (cls == "#32770")
+                {
+                    if (IsStdFileDialog(h)) found.Add(h);
+                }
+                else if (cls == "Qt5QWindowIcon" && IsWpsProcess(h))
+                {
+                    try { if (FindWpsDialogElement(h) != null) found.Add(h); }
+                    catch { }
+                }
+                else
+                {
+                    // 自定义规则窗口: 额外要求存在可见编辑框, 降低误触发主页/主窗口的概率
+                    if (MatchRule(h, cls) != null && FindFirstVisibleEdit(h) != IntPtr.Zero)
+                        found.Add(h);
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            DateTime now = DateTime.Now;
+
+            if (!_autoBaselineDone)
+            {
+                // 首次扫描把已存在的窗口记为基线, 避免程序启动瞬间对旧对话框误跳
+                foreach (var h in found) _handledDialogs[h] = now;
+                _autoBaselineDone = true;
+                return;
+            }
+
+            foreach (var h in found)
+            {
+                if (_handledDialogs.ContainsKey(h) || _pendingJumps.ContainsKey(h)) continue;
+                var pj = new PendingJump();
+                pj.Due = now.AddMilliseconds(AUTO_JUMP_DELAY_MS);
+                pj.Attempts = 0;
+                _pendingJumps[h] = pj;
+                Program.Log("自动跳转: 检测到对话框 (0x{0}), 准备跳转", h.ToInt64().ToString("X"));
+            }
+
+            // 清理已关闭的窗口(句柄可能被新对话框复用)与过期记录
+            if (_handledDialogs.Count > 0)
+            {
+                var stale = new List<IntPtr>();
+                foreach (var kv in _handledDialogs)
+                    if (!IsWindow(kv.Key) || (now - kv.Value).TotalMinutes > 10) stale.Add(kv.Key);
+                foreach (var h in stale) _handledDialogs.Remove(h);
+            }
+        }
+
+        /// <summary>
+        /// 标准 #32770 是否为文件对话框: 含文件名组合框(控件 1149) 或 ComboBoxEx32,
+        /// 或同时具备 ShellView 与可见编辑框(文件夹选择框)。
+        /// 消息框/选项框不含这些结构, 因此不会误触发。
+        /// </summary>
+        private static bool IsStdFileDialog(IntPtr h)
+        {
+            if (GetDlgItem(h, ID_FILE_COMBO) != IntPtr.Zero) return true;
+
+            bool hasCombo = false;
+            bool hasShellView = false;
+            EnumChildWindows(h, (c, l) =>
+            {
+                var sb = new StringBuilder(32);
+                GetClassName(c, sb, sb.Capacity);
+                string cn = sb.ToString();
+                if (cn == "ComboBoxEx32") { hasCombo = true; return false; }
+                if (cn == "ShellView" || cn == "DirectUIHWND") hasShellView = true;
+                return true;
+            }, IntPtr.Zero);
+
+            return hasCombo || (hasShellView && FindFirstVisibleEdit(h) != IntPtr.Zero);
+        }
+
+        private static void RunPendingJumps()
+        {
+            if (_pendingJumps.Count == 0) return;
+            DateTime now = DateTime.Now;
+            var done = new List<IntPtr>();
+
+            foreach (var kv in _pendingJumps)
+            {
+                IntPtr h = kv.Key;
+                if (!IsWindow(h)) { done.Add(h); continue; }
+                if (now < kv.Value.Due) continue;
+
+                bool ok = TryJump(h, false);
+                if (ok)
+                {
+                    _handledDialogs[h] = now;
+                    done.Add(h);
+                }
+                else if (++kv.Value.Attempts >= AUTO_JUMP_MAX_ATTEMPTS)
+                {
+                    _handledDialogs[h] = now; // 放弃, 避免无限重试
+                    done.Add(h);
+                    Program.Log("自动跳转: 已放弃该对话框 (0x{0})", h.ToInt64().ToString("X"));
+                }
+                else
+                {
+                    kv.Value.Due = now.AddMilliseconds(AUTO_JUMP_RETRY_MS);
+                }
+            }
+            foreach (var h in done) _pendingJumps.Remove(h);
+        }
+
+        /// <summary>记录"跳转后需要恢复的原始文件名"(如另存为的建议名称)。</summary>
+        private static void ScheduleRestore(IntPtr edit, AutomationElement uiaEdit, string original, string injected)
+        {
+            if (string.IsNullOrEmpty(original) || string.IsNullOrEmpty(injected)) return;
+            if (original.Trim().Equals(injected.Trim(), StringComparison.OrdinalIgnoreCase)) return;
+
+            var r = new PendingRestore();
+            r.Due = DateTime.Now.AddMilliseconds(RESTORE_DELAY_MS);
+            r.Edit = edit;
+            r.UiaEdit = uiaEdit;
+            r.Original = original;
+            r.Injected = injected;
+            _pendingRestores.Add(r);
+        }
+
+        private static void RunPendingRestores()
+        {
+            if (_pendingRestores.Count == 0) return;
+            DateTime now = DateTime.Now;
+
+            for (int i = _pendingRestores.Count - 1; i >= 0; i--)
+            {
+                var r = _pendingRestores[i];
+                if (now < r.Due) continue;
+                _pendingRestores.RemoveAt(i);
+
+                try
+                {
+                    string cur = r.UiaEdit != null ? GetUiaValue(r.UiaEdit) : GetEditText(r.Edit);
+                    // 跳转成功后文件名框通常为空; 若用户已输入内容则保持不动
+                    if (!string.IsNullOrEmpty(cur)) continue;
+
+                    if (r.UiaEdit != null)
+                    {
+                        var vp = r.UiaEdit.GetCurrentPattern(ValuePattern.Pattern) as ValuePattern;
+                        if (vp != null) vp.SetValue(r.Original);
+                    }
+                    else
+                    {
+                        SetTextWin32(r.Edit, r.Original);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static string GetUiaValue(AutomationElement el)
+        {
+            try
+            {
+                var vp = el.GetCurrentPattern(ValuePattern.Pattern) as ValuePattern;
+                return vp == null ? null : vp.Current.Value;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>跨进程读取 Edit 文本（GetWindowText 对他人进程控件不可靠, 改用 WM_GETTEXT）。</summary>
+        private static string GetEditText(IntPtr edit)
+        {
+            if (edit == IntPtr.Zero) return null;
+            try
+            {
+                var sb = new StringBuilder(2048);
+                IntPtr result;
+                IntPtr ok = SendMessageTimeoutText(edit, WM_GETTEXT, (IntPtr)sb.Capacity, sb,
+                    SMTO_ABORTIFHUNG | SMTO_NORMAL, 500, out result);
+                return ok == IntPtr.Zero ? null : sb.ToString();
+            }
+            catch { return null; }
         }
 
         private static bool SetTextWin32(IntPtr edit, string text)
@@ -182,11 +465,12 @@ namespace AutoModeASUS
         }
 
         /// <summary>按规则把路径注入目标窗口: uia=UIA 编辑框 SetValue, win32=WM_SETTEXT。</summary>
-        private static void RuleJump(IntPtr hwnd, string path, Program.QuickJumpRule rule)
+        private static bool RuleJump(IntPtr hwnd, string path, Program.QuickJumpRule rule)
         {
             string mode = string.IsNullOrEmpty(rule.Mode) ? "win32" : rule.Mode.Trim().ToLowerInvariant();
             bool done = mode == "uia" ? RuleJumpUia(hwnd, path, rule) : RuleJumpWin32(hwnd, path, rule);
             if (done) Program.Log("快速跳转(规则 {0}/{1}) → {2}", mode, rule.Name ?? "", path);
+            return done;
         }
 
         private static bool RuleJumpWin32(IntPtr hwnd, string path, Program.QuickJumpRule rule)
@@ -324,7 +608,7 @@ namespace AutoModeASUS
         /// 定位筛选行编辑框(KcfdFilterWidget 内的 Edit), SetValue 后回车。
         /// 思路移植自 XiaoYao_QuickJump 辅助/WPS文件对话框.ahk。
         /// </summary>
-        private static void WpsJump(IntPtr foreground, string path)
+        private static bool WpsJump(IntPtr foreground, string path)
         {
             try
             {
@@ -332,22 +616,23 @@ namespace AutoModeASUS
                 if (dialog == null)
                 {
                     Program.Log("快速跳转(WPS): 未识别到 WPS 文件浏览框");
-                    return;
+                    return false;
                 }
 
                 AutomationElement edit = FindWpsFileNameEdit(dialog);
                 if (edit == null)
                 {
                     Program.Log("快速跳转(WPS): 未找到文件名输入框");
-                    return;
+                    return false;
                 }
 
                 var vp = edit.GetCurrentPattern(ValuePattern.Pattern) as ValuePattern;
                 if (vp == null)
                 {
                     Program.Log("快速跳转(WPS): 文件名输入框不支持 Value 模式");
-                    return;
+                    return false;
                 }
+                string original = vp.Current.Value;
                 vp.SetValue(path);
 
                 // 激活对话框并把焦点给编辑框, 再模拟回车触发导航
@@ -358,11 +643,14 @@ namespace AutoModeASUS
                 IntPtr target = editHwnd != IntPtr.Zero ? editHwnd : new IntPtr(dlgHwnd);
                 PostMessage(target, WM_KEYDOWN, (IntPtr)VK_RETURN, (IntPtr)1);
                 PostMessage(target, WM_KEYUP, (IntPtr)VK_RETURN, (IntPtr)0xC0000001);
+                ScheduleRestore(IntPtr.Zero, edit, original, path);
                 Program.Log("快速跳转(WPS) → {0}", path);
+                return true;
             }
             catch (Exception ex)
             {
                 Program.Log("快速跳转(WPS)异常: " + ex.Message);
+                return false;
             }
         }
 
@@ -629,6 +917,11 @@ namespace AutoModeASUS
         [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
         private static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, int msg, IntPtr wParam,
             string lParam, uint flags, uint timeout, out IntPtr lpdwResult);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+        private static extern IntPtr SendMessageTimeoutText(IntPtr hWnd, int msg, IntPtr wParam,
+            StringBuilder lParam, uint flags, uint timeout, out IntPtr lpdwResult);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindow(IntPtr hWnd);
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll")]
